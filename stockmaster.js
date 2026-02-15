@@ -216,7 +216,7 @@ export async function main(ns) {
                     let baseBudget = Math.min(cash, maxHoldings * (diversification + stk.spread_pct) - stk.positionValue() * (1.01 + stk.spread_pct));
                     // Apply volatility-weighted position sizing: reduce budget for high-volatility stocks to manage risk
                     // At 0% volatility, use 100% of budget; at max observed volatility, use 50% of budget
-                    const maxVol = Math.max(...stocks.map(s => s.vol), 0.1); // Max volatility across all stocks (min 0.1 to avoid division by zero)
+                    const maxVol = Math.max(...allStocks.map(s => s.vol), 0.1); // Max volatility across all stocks (min 0.1 to avoid division by zero)
                     const volAdjustment = 0.5 + 0.5 * (1 - stk.vol / maxVol); // Linear scaling: 0.5 to 1.0
                     let budget = baseBudget * volAdjustment;
                     let purchasePrice = stk.bullish() ? stk.ask_price : stk.bid_price; // Depends on whether we will be buying a long or short position

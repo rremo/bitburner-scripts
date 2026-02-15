@@ -338,7 +338,7 @@ export async function main(ns) {
                         break
                 } //End of style switch
             } // end of turn >= 3
-            checkNewGame(ns, results)
+            if (checkNewGame(ns, results)) return; // Exit playGo when game is reset
         }
     }
 
@@ -363,12 +363,14 @@ export async function main(ns) {
 
     function checkNewGame(ns, gameInfo) {
         if (gameInfo.type === "gameOver") {
-            // Track game result
+            // Track game result - get game state BEFORE resetting
             const currentOpponent = ns.go.getOpponent();
+            const gameState = ns.go.getGameState();
+
             if (!winStats[currentOpponent]) {
                 winStats[currentOpponent] = {wins: 0, losses: 0, games: 0};
             }
-            const didWin = ns.go.getGameState().blackScore > ns.go.getGameState().whiteScore;
+            const didWin = gameState.blackScore > gameState.whiteScore;
             winStats[currentOpponent].games++;
             if (didWin) winStats[currentOpponent].wins++;
             else winStats[currentOpponent].losses++;
@@ -384,7 +386,9 @@ export async function main(ns) {
             catch { ns.go.resetBoardState(opponent[Math.floor(Math.random() * opponent.length)], 13) }
             turn = 0
             ns.clearLog()
+            return true; // Signal that game was reset
         }
+        return false; // Game is still in progress
     }
     /** @param {NS} ns
      * @param {number} x
