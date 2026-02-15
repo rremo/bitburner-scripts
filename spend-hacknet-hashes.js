@@ -13,6 +13,7 @@ const argsSchema = [
     ['ignore-reserve-if-upgrade-cost-less-than-pct', 0.01], // Hack to purchase capacity upgrades regardless of the curent global reserve if they cost less than this fraction of player money
     ['reserve-buffer', 1], // To avoid wasting hashes, spend if would be within this many hashes of our max capacity on the next tick.
     ['max-purchases-per-loop', 10000], // When we're producing hashes faster than we can spend them, this keeps things from getting hung up
+    ['fill-capacity-once', false], // Let hashes fill to capacity once for MAX_CACHE achievement, then resume normal spending
 ];
 
 const basicSpendOptions = ['Sell for Money', 'Generate Coding Contract', 'Improve Studying', 'Improve Gym Training',
@@ -69,6 +70,12 @@ export async function main(ns) {
     }
 
 
+    // Achievement: Track whether we've filled hash capacity once for MAX_CACHE achievement
+    const fillCapacityFlag = '/Temp/achievement-hash-capacity-filled.txt';
+    let fillCapacityMode = options['fill-capacity-once'] && !ns.read(fillCapacityFlag);
+    if (fillCapacityMode)
+        ns.print(`INFO: --fill-capacity-once active. Waiting for hashes to fill capacity for MAX_CACHE achievement...`);
+
     let lastHashBalance = -1; // Balance of hashes last time we woke up. If unchanged, we go back to sleep quickly (game hasn't ticked)
     let notifiedMaxCapacity = false; // Flag indicating we've maxed our hash capacity, to avoid repeatedly logging this fact.
     // Function determines the current cheapest upgrade of all the upgrades we wish to keep purchasing
@@ -77,8 +84,23 @@ export async function main(ns) {
     const formatHashes = (hashes) => formatNumberShort(hashes, 6, 3);
     while (true) {
         await ns.sleep(interval);
+
+        // Achievement: If fill-capacity-once is active, don't spend hashes until capacity is reached
+        if (fillCapacityMode) {
+            const capacity = ns.hacknet.hashCapacity() || 0;
+            const current = ns.hacknet.numHashes();
+            if (capacity > 0 && current >= capacity - 1) {
+                ns.write(fillCapacityFlag, 'true', 'w');
+                fillCapacityMode = false;
+                log(ns, `SUCCESS: Hash capacity filled (${formatNumberShort(current)}/${formatNumberShort(capacity)})! MAX_CACHE achievement should trigger. Resuming normal spending.`, true, 'success');
+            } else if (capacity > 0) {
+                ns.print(`Achievement: Hashes ${formatNumberShort(current, 6, 3)}/${formatNumberShort(capacity, 6, 3)} (${(current / capacity * 100).toFixed(1)}%) - waiting for capacity fill...`);
+                continue; // Skip spending this tick
+            }
+        }
+
         if (lowPriority && ns.hacknet.numHashes() > 0) // Low priority mode means any competing scripts should get to spend hashes first.
-            await ns.sleep(interval); // Yeild for an additional interval to give competing scripts a chance to spend first. 
+            await ns.sleep(interval); // Yeild for an additional interval to give competing scripts a chance to spend first.
         try {
             let capacity = ns.hacknet.hashCapacity() || 0;
             let currentHashes = ns.hacknet.numHashes();

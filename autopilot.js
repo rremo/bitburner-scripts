@@ -28,6 +28,8 @@ const argsSchema = [ // The set of all command line arguments
     ['xp-mode-interval-minutes', 55], // Every time this many minutes has elapsed, toggle daemon.js to runing in --xp-only mode, which prioritizes earning hack-exp rather than money
     ['xp-mode-duration-minutes', 5], // The number of minutes to keep daemon.js in --xp-only mode before switching back to normal money-earning mode.
     ['no-tail-windows', false], // Set to true to prevent the default behaviour of opening a tail window for certain launched scripts. (Doesn't affect scripts that open their own tail windows)
+    ['speed-run', false], // Optimize for FAST_BN achievement (complete BN in <48h). Reduces install delay, lowers aug thresholds, skips 4S wait.
+    ['challenge-mode', false], // Restrict features for BN challenge achievements. Auto-detects current BN and disables the restricted feature.
 ];
 
 export function autocomplete(data, args) {
@@ -119,6 +121,18 @@ export async function main(ns) {
         options = runOptions; // We don't set the global "options" until we're sure this is the only running instance
 
         log(ns, "INFO: Auto-pilot engaged...", true, 'info');
+        // Speed-run mode: Override settings to optimize for completing BN in <48h (FAST_BN achievement)
+        if (options['speed-run']) {
+            log(ns, `INFO: Speed-run mode active! Optimizing for FAST_BN achievement (<48h BitNode completion).`, true, 'info');
+            options['install-countdown'] = Math.min(options['install-countdown'], 30 * 1000); // Max 30s install delay
+            options['install-at-aug-count'] = Math.min(options['install-at-aug-count'], 4); // Reset sooner with fewer augs
+            options['install-at-aug-plus-nf-count'] = Math.min(options['install-at-aug-plus-nf-count'], 6);
+            options['disable-wait-for-4s'] = true; // Don't wait for 4S data, waste of time
+            options['reduced-aug-requirement-per-hour'] = Math.max(options['reduced-aug-requirement-per-hour'], 1); // Reduce aug req faster
+        }
+        // Challenge mode: Will be enforced after startUp() detects the current BN
+        if (options['challenge-mode'])
+            log(ns, `INFO: Challenge mode active! Will auto-restrict features for current BN's challenge achievement.`, true, 'info');
         // The game does not allow boolean flags to be turned "off" via command line, only on. Since this gets saved, notify the user about how they can turn it off.
         const flagsSet = ['disable-auto-destroy-bn', 'disable-bladeburner', 'disable-wait-for-4s', 'disable-rush-gangs'].filter(f => options[f]);
         for (const flag of flagsSet)
@@ -183,6 +197,31 @@ export async function main(ns) {
         if (nextBn != nextRecommendedBn)
             log(ns, `WARN: The next recommended BN is ${nextRecommendedBn}, but the --next-bn parameter is set to override this with ${nextBn}.`, true, 'warning');
 
+        // Challenge mode: auto-restrict features based on current BN
+        if (options['challenge-mode']) {
+            const bn = resetInfo.currentNode;
+            const challengeRestrictions = {
+                1: 'BN1: Max 128GB RAM + 1 Core. Avoid buying home upgrades beyond this!',
+                2: 'BN2: No Gang. Gang formation and gangs.js will be disabled.',
+                3: 'BN3: No Corporation. corporation.js will not be launched.',
+                6: 'BN6: No Bladeburner. Bladeburner will be disabled.',
+                7: 'BN7: No Bladeburner. Bladeburner will be disabled.',
+                8: 'BN8: No 4S Market Data. 4S purchase will be blocked.',
+                9: 'BN9: No Hacknet Income. Hash selling for money will be suppressed.',
+                10: 'BN10: No Sleeves. sleeve.js will not be launched.',
+                13: 'BN13: No Stanek\'s Gift. Stanek acceptance will be blocked.',
+            };
+            if (challengeRestrictions[bn]) {
+                log(ns, `CHALLENGE MODE: ${challengeRestrictions[bn]}`, true, 'warning');
+                // Apply the restrictions
+                if (bn === 2) options['disable-rush-gangs'] = true; // challengeNoGang handled in checkOnRunningScripts
+                if (bn === 6 || bn === 7) options['disable-bladeburner'] = true;
+                if (bn === 8) options['disable-wait-for-4s'] = true; // challengeNo4S handled in checkOnRunningScripts
+            } else {
+                log(ns, `WARNING: Challenge mode is active but BN${bn} has no known challenge restriction. Running normally.`, true, 'warning');
+            }
+        }
+
         return true;
     }
 
@@ -242,6 +281,8 @@ export async function main(ns) {
         let stocksValue = 0;
         try { stocksValue = await getStocksValue(ns); } catch { /* Assume if this fails (insufficient ram) we also have no stocks */ }
         manageReservedMoney(ns, player, stocksValue);
+        // Speed-run: Log time pressure and aggressively push for completion when running low on time
+        if (options['speed-run']) checkSpeedRunPressure(ns, player);
         await checkOnDaedalusStatus(ns, player, stocksValue);
         await checkIfBnIsComplete(ns, player);
         await maybeAcceptStaneksGift(ns, player);
@@ -359,6 +400,38 @@ export async function main(ns) {
             log(ns, `WARN: We previously had sufficient wealth to earn a Daedalus invite (>=${formatMoney(moneyReq)}), ` +
                 `but our wealth somehow decreased (to ${formatMoney(totalWorth)}) before the invite was recieved, ` +
                 `so we'll need to wait for it to recover and try again later.`, false, 'warning');
+        }
+    }
+
+    /** Speed-run: Track time pressure and escalate urgency as 48h deadline approaches.
+     * @param {NS} ns
+     * @param {Player} player */
+    let lastSpeedRunLog = 0;
+    function checkSpeedRunPressure(ns, player) {
+        const bnTimeMs = getTimeInBitnode();
+        const bnTimeH = bnTimeMs / 3.6e6;
+        const remainingH = 48 - bnTimeH;
+
+        // Log every 5 minutes
+        if (Date.now() - lastSpeedRunLog > 5 * 60 * 1000) {
+            lastSpeedRunLog = Date.now();
+            if (remainingH > 12)
+                log(ns, `Speed-run: ${bnTimeH.toFixed(1)}h elapsed, ${remainingH.toFixed(1)}h remaining for FAST_BN achievement.`);
+            else if (remainingH > 0)
+                log(ns, `WARNING: Speed-run: Only ${remainingH.toFixed(1)}h remaining! Hack: ${player.skills.hacking}` +
+                    (wdHack ? ` / WD requires: ${wdHack}` : ''), false, 'warning');
+            else
+                log(ns, `WARNING: Speed-run: 48h exceeded (${bnTimeH.toFixed(1)}h). FAST_BN achievement no longer possible this run.`, false, 'warning');
+        }
+
+        // After 36h, force aggressive hack XP mode if w0r1d_d43m0n is available
+        if (remainingH < 12 && wdHack && wdHack !== Infinity && player.skills.hacking < wdHack)
+            prioritizeHackForWd = true;
+
+        // After 42h, reduce install countdown to minimum to avoid wasting time on resets
+        if (remainingH < 6) {
+            options['install-countdown'] = Math.min(options['install-countdown'], 10 * 1000);
+            options['install-at-aug-count'] = Math.min(options['install-at-aug-count'], 2);
         }
     }
 
@@ -516,14 +589,23 @@ export async function main(ns) {
         homeRam = await getNsDataThroughFile(ns, `ns.getServerMaxRam(ns.args[0])`, null, ["home"]);
 
         // Launch stock-master in a way that emphasizes it as our main source of income early-on
-        if (!findScript('stockmaster.js') && !disableStockmasterForDaedalus && homeRam >= 32)
-            launchScriptHelper(ns, 'stockmaster.js', [
+        if (!findScript('stockmaster.js') && !disableStockmasterForDaedalus && homeRam >= 32) {
+            const stockArgs = [
                 "--fracH", resetInfo.currentNode == 8 ? 0.001 : 0.1, // Fraction of wealth to keep as cash (10% - unless in BN8)
                 "--reserve", 0, // Override to ignore the global reserve.txt. Any money we reserve can more or less safely live as stocks
-            ]);
+            ];
+            // Challenge BN8: Prevent purchasing 4S market data
+            if (options['challenge-mode'] && resetInfo.currentNode === 8)
+                stockArgs.push("--buy-4s-budget", 0);
+            launchScriptHelper(ns, 'stockmaster.js', stockArgs);
+        }
 
+        // Challenge BN10: Don't use sleeves at all
+        if (options['challenge-mode'] && resetInfo.currentNode === 10 && findScript('sleeve.js'))
+            await killScript(ns, 'sleeve.js', runningScripts);
         // Launch sleeves and allow them to also ignore the reserve so they can train up to boost gang unlock speed
-        if ((10 in unlockedSFs) && (2 in unlockedSFs) && !findScript('sleeve.js')) {
+        if ((10 in unlockedSFs) && (2 in unlockedSFs) && !findScript('sleeve.js') &&
+            !(options['challenge-mode'] && resetInfo.currentNode === 10)) {
             let sleeveArgs = [];
             if (!options["disable-casino"] && !ranCasino)
                 sleeveArgs.push("--training-reserve", 300000); // Avoid training away our casino seed money
@@ -533,8 +615,10 @@ export async function main(ns) {
         }
 
         // Spend hacknet hashes on our boosting best hack-income server once established
+        // Challenge BN9: Don't spend hashes for money (suppress all hash-selling scripts)
+        const challengeNoHacknetMoney = options['challenge-mode'] && resetInfo.currentNode === 9;
         let existingSpendHashesProc = findScript('spend-hacknet-hashes.js', s => s.args.includes("--spend-on-server"))
-        if ((9 in unlockedSFs) && getTimeInAug() >= options['time-before-boosting-best-hack-server']
+        if (!challengeNoHacknetMoney && (9 in unlockedSFs) && getTimeInAug() >= options['time-before-boosting-best-hack-server']
             && 0 != bitNodeMults.ScriptHackMoney * bitNodeMults.ScriptHackMoneyGain) // No point in boosting hack income if it's scaled to 0 in the current BN
         {
             const strServerIncomeInfo = ns.read('/Temp/analyze-hack.txt');	// HACK: Steal this file that Daemon also relies on
@@ -685,10 +769,14 @@ export async function main(ns) {
             "--training-stat-per-multi-threshold", 200, // Be willing to spend more time grinding for stats rather than skipping a faction
             "--prioritize-invites"]); // Don't actually start working for factions until we've earned as many invites as we think we can
         // If gangs are unlocked, micro-manage how 'work-for-factions.js' is running by killing off unwanted instances
+        const challengeNoGang = options['challenge-mode'] && resetInfo.currentNode === 2;
         if (2 in unlockedSFs) {
+            // Challenge BN2: Kill gangs.js if running and prevent gang formation
+            if (challengeNoGang && findScript('gangs.js'))
+                await killScript(ns, 'gangs.js', runningScripts);
             // Check if we've joined a gang yet. (Never have to check again once we know we're in one)
             if (!playerInGang) playerInGang = await getNsDataThroughFile(ns, 'ns.gang.inGang()');
-            rushGang = !options['disable-rush-gangs'] && !playerInGang;
+            rushGang = !options['disable-rush-gangs'] && !playerInGang && !challengeNoGang;
             // Detect if a 'work-for-factions.js' instance is running with args that don't match our goal. We aren't too picky,
             // (so the player can run with custom args), but should have --crime-focus if (and only if) we're still working towards a gang.
             const wrongWork = findScript('work-for-factions.js', !rushGang ? s => s.args.includes("--crime-focus") :
@@ -698,7 +786,7 @@ export async function main(ns) {
 
             // Start gangs immediately (even though daemon would eventually start it) since we want any income they provide right away after an ascend
             // TODO: Consider monitoring gangs territory progress and increasing their budget / decreasing their reserve to help kick-start them
-            if (playerInGang && !findScript('gangs.js'))
+            if (playerInGang && !findScript('gangs.js') && !challengeNoGang)
                 launchScriptHelper(ns, 'gangs.js');
         }
 
@@ -725,6 +813,8 @@ export async function main(ns) {
     async function maybeAcceptStaneksGift(ns, player) {
         // Look for any reason not to accept stanek's gift (do the quickest checks first)
         if (acceptedStanek) return;
+        // Challenge BN13: Never accept Stanek's Gift
+        if (options['challenge-mode'] && resetInfo.currentNode === 13) return acceptedStanek = true;
         // Don't get Stanek's gift too early if its size is reduced in this BN
         if (bitNodeMults.StaneksGiftExtraSize < 0) return;
         // If Stanek's gift size isn't reduced, but is penalized, don't get it too early 

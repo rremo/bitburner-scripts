@@ -10,7 +10,7 @@ const argsSchema = [
     ['max-spend', Number.MAX_VALUE], // The maximum amount of money to spend on upgrades
     ['toast', false], // Set to true to toast purchases
     ['reserve', null], // Reserve this much cash (defaults to contents of reserve.txt if not specified)
-
+    ['max-one-for-achievement', false], // Max out one node/server for MAX_HACKNET_NODE/MAX_HACKNET_SERVER achievement
 ];
 
 export function autocomplete(data, _) {
@@ -62,9 +62,82 @@ function setStatus(ns, logMessage) {
     if (logMessage != lastUpgradeLog) ns.print(lastUpgradeLog = logMessage);
 }
 
+// Achievement: Fully max one node/server regardless of payoff time for MAX_HACKNET_NODE / MAX_HACKNET_SERVER achievement
+function tryMaxOneForAchievement(ns, options) {
+    const numNodes = ns.hacknet.numNodes();
+    if (numNodes === 0) {
+        // Buy a node first
+        const cost = ns.hacknet.getPurchaseNodeCost();
+        const reserve = (options['reserve'] != null ? options['reserve'] : Number(ns.read("reserve.txt") || 0));
+        if (cost <= ns.getPlayer().money - reserve) {
+            if (ns.hacknet.purchaseNode() !== -1) {
+                setStatus(ns, `Achievement: Purchased first hacknet node to begin maxing for achievement.`);
+                return cost;
+            }
+        }
+        setStatus(ns, `Achievement: Need ${formatMoney(cost)} to purchase first hacknet node for achievement.`);
+        return 0;
+    }
+
+    // Find the node closest to being fully maxed (most total upgrade cost already spent = fewest remaining upgrades)
+    let bestNode = 0, leastRemainingCost = Infinity;
+    for (let i = 0; i < numNodes; i++) {
+        const remaining = [
+            ns.hacknet.getLevelUpgradeCost(i, 1),
+            ns.hacknet.getRamUpgradeCost(i, 1),
+            ns.hacknet.getCoreUpgradeCost(i, 1),
+            ...(haveHacknetServers ? [ns.hacknet.getCacheUpgradeCost(i, 1)] : []),
+        ].reduce((sum, c) => sum + (isFinite(c) ? c : 0), 0);
+        if (remaining === 0) continue; // Already fully maxed
+        if (remaining < leastRemainingCost) {
+            leastRemainingCost = remaining;
+            bestNode = i;
+        }
+    }
+
+    if (leastRemainingCost === Infinity || leastRemainingCost === 0) {
+        setStatus(ns, `Achievement: A hacknet node/server is already fully maxed! Achievement should be unlocked.`);
+        return false; // Done, no more upgrades needed
+    }
+
+    // Buy the cheapest remaining upgrade for this node
+    const upgradeFns = [
+        { name: 'level', cost: ns.hacknet.getLevelUpgradeCost(bestNode, 1), fn: () => ns.hacknet.upgradeLevel(bestNode, 1) },
+        { name: 'ram', cost: ns.hacknet.getRamUpgradeCost(bestNode, 1), fn: () => ns.hacknet.upgradeRam(bestNode, 1) },
+        { name: 'cores', cost: ns.hacknet.getCoreUpgradeCost(bestNode, 1), fn: () => ns.hacknet.upgradeCore(bestNode, 1) },
+    ];
+    if (haveHacknetServers)
+        upgradeFns.push({ name: 'cache', cost: ns.hacknet.getCacheUpgradeCost(bestNode, 1), fn: () => ns.hacknet.upgradeCache(bestNode, 1) });
+
+    // Pick the cheapest finite-cost upgrade
+    const affordable = upgradeFns.filter(u => isFinite(u.cost)).sort((a, b) => a.cost - b.cost);
+    if (affordable.length === 0) {
+        setStatus(ns, `Achievement: hacknet-node-${bestNode} is fully maxed! Achievement should be unlocked.`);
+        return false;
+    }
+
+    const reserve = (options['reserve'] != null ? options['reserve'] : Number(ns.read("reserve.txt") || 0));
+    const pick = affordable[0];
+    if (pick.cost > ns.getPlayer().money - reserve) {
+        setStatus(ns, `Achievement: Need ${formatMoney(pick.cost)} to upgrade hacknet-node-${bestNode} ${pick.name} (have ${formatMoney(ns.getPlayer().money - reserve)} available).`);
+        return 0;
+    }
+
+    if (pick.fn()) {
+        const stats = ns.hacknet.getNodeStats(bestNode);
+        setStatus(ns, `Achievement: Upgraded hacknet-node-${bestNode} ${pick.name} (L:${stats.level} R:${stats.ram} C:${stats.cores}${haveHacknetServers ? ` $:${stats.cache}` : ''}). Remaining: ${formatMoney(leastRemainingCost - pick.cost)}`);
+        return pick.cost;
+    }
+    return 0;
+}
+
 // Will buy the most effective hacknet upgrade, so long as it will pay for itself in the next {payoffTimeSeconds} seconds.
 /** @param {NS} ns **/
 export function upgradeHacknet(ns, maxSpend, maxPayoffTimeSeconds = 3600 /* 3600 sec == 1 hour */, options) {
+    // Achievement mode: max out one node regardless of payoff time
+    if (options['max-one-for-achievement'])
+        return tryMaxOneForAchievement(ns, options);
+
     const currentHacknetMult = ns.getPlayer().mults.hacknet_node_money;
     // Get the lowest cache level, we do not consider upgrading the cache level of servers above this until all have the same cache level
     const minCacheLevel = [...Array(ns.hacknet.numNodes()).keys()].reduce((min, i) => Math.min(min, ns.hacknet.getNodeStats(i).cache), Number.MAX_VALUE);

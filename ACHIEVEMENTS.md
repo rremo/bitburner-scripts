@@ -30,41 +30,62 @@ These unlock automatically by running `autopilot.js`:
 | Scripts | 1 | NS2 script (always true) |
 | Misc | 1 | Backdoor powerhouse-fitness |
 
-### Newly Automated (~10 achievements)
+### Newly Automated (~20 achievements)
 
 These are now automated with the latest script changes:
 
 | Achievement | Script | How It Works |
 |-------------|--------|-------------|
-| **Karma -1M** | `sleeve.js` | Sleeve 0 now grinds homicide until karma <= -1M |
+| **Karma -1M** | `sleeve.js` | Sleeve 0 grinds homicide until karma <= -1M |
 | **Gang Member 10k** | `gangs.js` | Strongest member protected from ascending until 10k stat |
 | **BB 100k Unspent SP** | `bladeburner.js` | Stops spending skill points after Overclock max, saves to 100k |
 | **Script >= 32GB** | `achievement-32gb-script.js` | Just having this file on home triggers the achievement |
 | **Stock $1Q Profit** | `stockmaster.js` | Long-term trading accumulates to $1Q |
+| **1000 Running Scripts** | `achieve-1000-scripts.js` | Spawns minimal scripts across network (needs ~1.6TB RAM) |
+| **Max Hacknet Node** | `hacknet-upgrade-manager.js` | `--max-one-for-achievement` maxes one node completely |
+| **Max Hacknet Server** | `hacknet-upgrade-manager.js` | Same flag, works for both nodes and servers |
+| **Fill Hash Capacity** | `spend-hacknet-hashes.js` | `--fill-capacity-once` waits for hashes to fill, then resumes |
+| **Speed Run < 48h** | `autopilot.js` | `--speed-run` optimizes for fast BN completion |
+| **Create Corporation** | `corporation.js` | Auto-creates and manages a corporation |
+| **Unlock Lobbying** | `corporation.js` | Purchases Government Partnership when affordable |
+| **Production x1000** | `corporation.js` | Grows division production multiplier to 1000+ |
+| **3000 Employees** | `corporation.js` | Scales offices and hires across all cities |
+| **Real Estate Division** | `corporation.js` | Creates a Real Estate division automatically |
 
 ### Requires Configuration (~8 achievements)
 
 | Achievement | Command | Notes |
 |-------------|---------|-------|
-| **Combat 3000** | `run sleeve.js --train-to-strength 3000 --train-to-defense 3000 --train-to-dexterity 3000 --train-to-agility 3000 --training-cap-seconds 999999999` | Very long, best in BN2 |
+| **Combat 3000** | `run sleeve.js --train-to-strength 3000 ...` | Very long, best in BN2 |
 | **Intelligence 255** | `run farm-intelligence.js` | BN5 only |
-| **1000 Running Scripts** | `run achieve-1000-scripts.js` | Needs ~2TB+ network RAM |
-| **Max Hacknet Node** | `run hacknet-upgrade-manager.js --max-one-for-achievement` | One node fully maxed |
-| **Max Hacknet Server** | Same as above | One server fully maxed |
-| **Fill Hash Capacity** | Pause `spend-hacknet-hashes.js` briefly | Let hashes fill once |
-| **All Hacknet Servers** | `run hacknet-upgrade-manager.js` with generous payoff | Buy all 20 servers |
-| **Speed Run < 48h** | Rush w0r1d_d43m0n in BN1 with high SFs | Target BN1 or BN8 |
+| **All Hacknet Servers** | `run hacknet-upgrade-manager.js -c --max-payoff-time 999h` | Buy all 20 servers |
+| **Speed Run < 48h** | `run autopilot.js --speed-run` | Best in BN1/BN8 with high SFs |
+| **BN Challenges** (9) | `run autopilot.js --challenge-mode` | Auto-restricts features per BN |
 
-### Manual Required (~13 achievements)
+### BN Challenge Mode Details
+
+`--challenge-mode` auto-detects the current BN and disables the restricted feature:
+
+| BN | Restriction | What Gets Disabled |
+|----|------------|-------------------|
+| BN1 | 128GB + 1 Core | Warning shown (don't buy home upgrades) |
+| BN2 | No Gang | gangs.js killed, gang formation blocked |
+| BN3 | No Corporation | corporation.js should not be run |
+| BN6 | No Bladeburner | bladeburner.js disabled via daemon |
+| BN7 | No Bladeburner | bladeburner.js disabled via daemon |
+| BN8 | No 4S Data | stockmaster --buy-4s-budget 0 |
+| BN9 | No Hacknet Income | spend-hacknet-hashes suppressed |
+| BN10 | No Sleeves | sleeve.js killed and blocked |
+| BN13 | No Stanek | Stanek's Gift acceptance blocked |
+
+### Manual Required (~5 achievements)
 
 | Achievement | Condition | Notes |
 |-------------|-----------|-------|
-| **-$1B Debt** | Player.money <= -1e9 | Hard to trigger via API |
+| **-$1B Debt** | Player.money <= -1e9 | Overspend on augs before reset |
 | **Hospitalized** | Go to hospital once | Fail a dangerous crime manually |
 | **1h in BitVerse** | Stay on BitVerse screen | AFK for 1+ hours |
 | **All 8 Sleeves** | SF10.3 + buy sleeves | Manual sleeve purchase |
-| **Corporation** (5) | Create corp, lobbying, 1000 prod, 3000 employees, Real Estate | No corp script yet |
-| **BN Challenges** (9) | Complete BNs with restrictions | Use `--challenge-mode` flags |
 | **BN12 Level 50** | Destroy BN12 fifty times | Extreme grind |
 
 ### Secret/Exploit (12 achievements)
@@ -87,13 +108,15 @@ run achievement-tracker.js
 Shows real-time progress for all 98 achievements:
 - Overall completion percentage
 - Per-category progress bars
-- Next achievable targets with hints
-- Optimization tips
+- Persistent storage remembers one-time achievements across resets
+- `[?]` marks achievements that can't be verified via API
+- Corporation achievements now auto-detected via API
 
 Options:
 ```bash
-run achievement-tracker.js --show-all       # Show all 98 achievements
-run achievement-tracker.js --interval 30000 # Update every 30 seconds
+run achievement-tracker.js --show-all            # Show all 98 achievements
+run achievement-tracker.js --interval 30000      # Update every 30 seconds
+run achievement-tracker.js --mark-earned TRAVEL   # Manually mark an unverifiable achievement
 ```
 
 ---
@@ -110,9 +133,26 @@ run achievement-tracker.js
 # 3. The 32GB script achievement (instant - just have the file)
 # achievement-32gb-script.js is already on home
 
-# 4. Karma grinding happens automatically (sleeve 0 does homicide)
-# Bladeburner skill points save automatically after Overclock max
-# Gang strongest member is protected until 10k stat
+# 4. Automatic achievements (no config needed):
+# - Karma grinding: sleeve 0 does homicide until -1M
+# - Bladeburner SP: saves 100k after Overclock max
+# - Gang member power: strongest member protected until 10k stat
+
+# 5. Hacknet achievements (run once when ready):
+run hacknet-upgrade-manager.js -c --max-one-for-achievement  # Max one node/server
+run spend-hacknet-hashes.js --fill-capacity-once              # Fill hash capacity
+
+# 6. 1000 scripts (needs ~1.6TB+ network RAM):
+run achieve-1000-scripts.js
+
+# 7. Speed run (use in BN1 or BN8 with high SFs):
+run autopilot.js --speed-run
+
+# 8. Corporation (needs $150B or BN3):
+run corporation.js
+
+# 9. BN Challenges (run in each target BN):
+run autopilot.js --challenge-mode
 ```
 
 ## Recommended Achievement Path
@@ -133,15 +173,30 @@ run achievement-tracker.js
 - Gang member 10k stat (automatic via ascend protection)
 - Bladeburner 100k SP (automatic after Overclock max)
 
-### Phase 4: Long-Term Goals
-- Hacking 100k, Combat 3000, Intelligence 255
-- All hacknet achievements
-- $1 Quintillion, Stock $1Q profit
-- Speed run in < 48 hours
+### Phase 4: Hacknet & Scripts
+- `run hacknet-upgrade-manager.js -c --max-one-for-achievement` - Max node/server
+- `run spend-hacknet-hashes.js --fill-capacity-once` - Fill hash capacity
+- `run achieve-1000-scripts.js` - 1000 running scripts
 
-### Phase 5: Manual Challenges
-- Corporation (5 achievements) - manual play
-- BN Challenges (9 achievements) - restricted runs
+### Phase 5: Corporation
+- `run corporation.js` - Automates all 5 corporation achievements
+- Needs $150B to self-fund (or play in BN3 for free creation)
+- Achievements: Create Corp, Real Estate, 3000 Employees, Prod x1000, Lobbying
+
+### Phase 6: Long-Term Goals
+- Hacking 100k, Combat 3000, Intelligence 255
+- $1 Quintillion, Stock $1Q profit
+- Speed run in < 48 hours (`--speed-run` flag)
+
+### Phase 7: BN Challenges
+- `run autopilot.js --challenge-mode` in each target BN
+- BN1 (128GB+1Core), BN2 (No Gang), BN3 (No Corp)
+- BN6/7 (No BB), BN8 (No 4S), BN9 (No Hacknet$)
+- BN10 (No Sleeves), BN13 (No Stanek)
+
+### Phase 8: Manual & Exploits
+- Hospitalized, -$1B Debt, 1h in BitVerse, All 8 Sleeves
+- BN12 Level 50 (extreme grind)
 - Exploits (12 achievements) - community guides
 
 ---
@@ -154,8 +209,13 @@ run achievement-tracker.js
 | `bladeburner.js` | Stops spending SP after Overclock max until 100k saved | BLADEBURNER_UNSPENT_100000 |
 | `gangs.js` | Strongest member skipped during ascension until 10k stat | GANG_MEMBER_POWER |
 | `daemon.js` | Skips servers with <95% hack chance | Better efficiency |
-| `achievement-tracker.js` | Complete rewrite tracking all 98 achievements | All tracking |
+| `achievement-tracker.js` | Tracks all 98 achievements with API detection + persistence | All tracking |
 | `achievement-32gb-script.js` | New file with >32GB RAM cost | SCRIPT_32GB |
+| `achieve-1000-scripts.js` | New file spawning 1000 scripts across network | RUNNING_SCRIPTS_1000 |
+| `hacknet-upgrade-manager.js` | `--max-one-for-achievement` maxes one node/server | MAX_HACKNET_NODE/SERVER |
+| `spend-hacknet-hashes.js` | `--fill-capacity-once` fills hash capacity | MAX_CACHE |
+| `autopilot.js` | `--speed-run` for <48h BN, `--challenge-mode` for BN challenges | FAST_BN, CHALLENGE_BN* |
+| `corporation.js` | New file automating full corporation management | 5 CORPORATION_* achievements |
 
 ---
 
@@ -164,7 +224,7 @@ run achievement-tracker.js
 | Status | Count |
 |--------|-------|
 | Fully automated | ~55 |
-| Newly automated | ~10 |
+| Newly automated | ~20 |
 | Needs config | ~8 |
-| Manual required | ~13 |
+| Manual required | ~5 |
 | Secret/exploit | ~12 |
