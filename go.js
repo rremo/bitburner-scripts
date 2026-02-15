@@ -221,7 +221,7 @@ export async function main(ns) {
                         if (results = await movePiece(ns, getRandomLibAttack())) break
                         if (results = await movePiece(ns, getRandomStrat())) break
                         ns.print("Turn Passed")
-                        results = await ns.go.passTurn()
+                        results = await safePassTurn(ns)
                         break
                     case 1:  //The Black Hand
                         if (results = await movePiece(ns, getRandomCounterLib())) break
@@ -240,7 +240,7 @@ export async function main(ns) {
                         if (results = await movePiece(ns, getRandomLibAttack())) break
                         if (results = await movePiece(ns, getRandomStrat())) break
                         ns.print("Turn Passed")
-                        results = await ns.go.passTurn()
+                        results = await safePassTurn(ns)
                         break
                     case 2: //Mr. Mustacio - Slum Snakes
                         if (results = await movePiece(ns, getRandomCounterLib())) break
@@ -259,7 +259,7 @@ export async function main(ns) {
                         if (results = await movePiece(ns, getRandomLibAttack())) break
                         if (results = await movePiece(ns, getRandomStrat())) break
                         ns.print("Turn Passed")
-                        results = await ns.go.passTurn()
+                        results = await safePassTurn(ns)
                         break
                     case 3: //Daedalus
                         if (results = await movePiece(ns, getRandomCounterLib())) break
@@ -278,7 +278,7 @@ export async function main(ns) {
                         if (results = await movePiece(ns, getRandomLibAttack())) break
                         if (results = await movePiece(ns, getRandomStrat())) break
                         ns.print("Turn Passed")
-                        results = await ns.go.passTurn()
+                        results = await safePassTurn(ns)
                         break
                     case 4: //Tetrads
                         if (results = await movePiece(ns, getRandomCounterLib())) break
@@ -297,7 +297,7 @@ export async function main(ns) {
                         if (results = await movePiece(ns, getRandomLibAttack())) break
                         if (results = await movePiece(ns, getRandomStrat(),)) break
                         ns.print("Turn Passed")
-                        results = await ns.go.passTurn()
+                        results = await safePassTurn(ns)
                         break
                     case 5: //Illum
                         if (results = await movePiece(ns, getRandomCounterLib())) break
@@ -315,7 +315,7 @@ export async function main(ns) {
                         if (results = await movePiece(ns, getRandomLibAttack())) break
                         if (results = await movePiece(ns, getRandomStrat())) break
                         ns.print("Turn Passed")
-                        results = await ns.go.passTurn()
+                        results = await safePassTurn(ns)
                         break
                     case 6: //??????
                         if (results = await movePiece(ns, getRandomCounterLib())) break
@@ -334,7 +334,7 @@ export async function main(ns) {
                         if (results = await movePiece(ns, getRandomLibAttack())) break
                         if (results = await movePiece(ns, getRandomStrat())) break
                         ns.print("Turn Passed")
-                        results = await ns.go.passTurn()
+                        results = await safePassTurn(ns)
                         break
                 } //End of style switch
             } // end of turn >= 3
@@ -1351,6 +1351,19 @@ export async function main(ns) {
             return results
         }
         catch { return false }
+    }
+    /** @param {NS} ns
+     * Safe wrapper for passTurn that checks if game is over first
+     * @returns {Promise<{type:"move"|"pass"|"gameOver"; x:number; y:number;}}  */
+    async function safePassTurn(ns) {
+        // Check game state before attempting to pass turn
+        const gameState = ns.go.getGameState();
+        if (gameState.gameOver) {
+            // Game is already over, return gameOver type
+            return { type: "gameOver", x: -1, y: -1 };
+        }
+        // Game is still active, safe to pass turn
+        return await ns.go.passTurn();
     }
     function getAllValidMoves(notMine = false) {
         if (currentValidMovesTurn === turn) return notMine ? currentValidContestedMoves : currentValidMoves

@@ -1156,10 +1156,10 @@ export async function main(ns) {
             // Logic for whether we consider the server "prepped" (tolerate a 1% discrepancy)
             this._isPrepped = (currentSecurity == 0 || ((this.getMinSecurity() / currentSecurity) >= 0.99)) &&
                 (this.getMaxMoney() != 0 && ((currentMoney / this.getMaxMoney()) >= 0.99) || stockFocus /* Only prep security in stock-focus mode */);
-            // Validate hack chance if server is prepped (warn if low success rate)
+            // Validate hack chance if server is prepped (warn only if very low success rate)
             if (this._isPrepped && hasFormulas) {
                 const chance = this.hackChance();
-                if (chance < 0.95) {
+                if (chance < 0.80) { // Only warn if <80% (previously 95%)
                     log(ns, `WARNING: ${this.name} has low hack chance (${formatNumber(chance * 100, 1)}%) at minimum security. ` +
                         `Required hack level: ${this.requiredHackLevel}, Current: ${playerHackSkill()}`, false, 'warning');
                 }
@@ -1956,8 +1956,12 @@ export async function main(ns) {
 
     /** @returns {Server[]} All hackable servers, in order of best Hack Exp to worst */
     function getXPFarmTargetsByExp() {
-        return getAllServers().filter(server => (server.hasRoot() || server.canCrack()) && server.canHack() && server.shouldHack())
-            .sort((a, b) => b.getExpPerSecond() - a.getExpPerSecond());
+        return getAllServers().filter(server =>
+            (server.hasRoot() || server.canCrack()) &&
+            server.canHack() &&
+            server.shouldHack() &&
+            (!hasFormulas || server.hackChance() >= 0.95) // Skip servers with <95% hack chance
+        ).sort((a, b) => b.getExpPerSecond() - a.getExpPerSecond());
     }
 
     /** @returns {Server} The best server to target for Hack Exp */

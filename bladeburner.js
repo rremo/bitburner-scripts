@@ -368,6 +368,12 @@ async function spendSkillPoints(ns) {
     while (true) { // Loop until we determine there's nothing left to spend skill points on
         const unspent = await getBBInfo(ns, 'getSkillPoints()');
         if (unspent == 0) return;
+        // Achievement: Save 100k unspent skill points for BLADEBURNER_UNSPENT_100000
+        const overclockLevel = await getBBInfo(ns, 'getSkillLevel("Overclock")');
+        if (overclockLevel >= 90 && unspent < 100000) {
+            log(ns, `INFO: Saving skill points for achievement (${unspent}/100000). Overclock already maxed.`);
+            return;
+        }
         const skillLevels = await getBBDict(ns, 'getSkillLevel(%)', skillNames);
         const skillCosts = await getBBDict(ns, 'getSkillUpgradeCost(%)', skillNames);
         // Find the next lowest skill cost

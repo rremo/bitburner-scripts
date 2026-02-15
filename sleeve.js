@@ -324,6 +324,9 @@ async function pickSleeveTask(ns, playerInfo, playerWorkInfo, i, sleeve, canTrai
     // If gangs are available, prioritize homicide until we've got the requisite -54K karma to unlock them
     if (!playerInGang && !options['disable-gang-homicide-priority'] && (2 in ownedSourceFiles) && ns.heart.break() > -54000)
         return await crimeTask(ns, 'homicide', i, sleeve, 'we want gang karma'); // Ignore chance - even a failed homicide generates more Karma than every other crime
+    // Achievement: Keep at least sleeve 0 grinding homicide until -1M karma for KARMA_1000000 achievement
+    if (i === 0 && ns.heart.break() > -1e6)
+        return await crimeTask(ns, 'homicide', i, sleeve, 'grinding karma to -1M for achievement');
     // If the player is in bladeburner, and has already unlocked gangs with Karma, generate contracts and operations
     if (playerInBladeburner) {
         // Hack: Without paying much attention to what's happening in bladeburner, pre-assign a variety of tasks by sleeve index

@@ -405,8 +405,17 @@ async function doRecruitMember(ns) {
  * Check if any members are deemed worth ascending to increase a stat multiplier **/
 async function tryAscendMembers(ns) {
     const dictAscensionResults = await getGangInfoDict(ns, myGangMembers, 'getAscensionResult');
+    // Achievement: Find strongest member and protect them from ascending until 10k stat (GANG_MEMBER_POWER)
+    const dictMembers = await getGangInfoDict(ns, myGangMembers, 'getMemberInformation');
+    let strongestMember = null, maxStatValue = 0;
+    for (const [name, info] of Object.entries(dictMembers)) {
+        const best = Math.max(...importantStats.map(s => info[s] || 0));
+        if (best > maxStatValue) { maxStatValue = best; strongestMember = name; }
+    }
     for (let i = 0; i < myGangMembers.length; i++) {
         const member = myGangMembers[i];
+        // Achievement: Skip ascending strongest member until they reach 10k in any stat
+        if (member === strongestMember && maxStatValue < 10000) continue;
         // First members are given the largest threshold, so that early on when they are our only members, they are more stable
         const ascMultiThreshold = options['ascend-multi-threshold'] + (11 - i) * options['ascend-multi-threshold-spacing'];
         const ascResult = dictAscensionResults[member];
