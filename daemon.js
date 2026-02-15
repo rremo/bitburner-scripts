@@ -267,6 +267,16 @@ export async function main(ns) {
         }
 
         disableLogs(ns, ['getServerMaxRam', 'getServerUsedRam', 'getServerMoneyAvailable', 'getServerGrowth', 'getServerSecurityLevel', 'exec', 'scan', 'sleep']);
+
+        // Configure tail window UI (v2.8.0+ API)
+        try {
+            if (ns.ui?.setTailFontSize) {
+                ns.ui.setTailFontSize(11); // Slightly smaller font for more info density
+            }
+        } catch {
+            // UI API not available in this version
+        }
+
         // Reset global vars on startup since they persist in memory in certain situations (such as on Augmentation)
         // TODO: Can probably get rid of all of this now that the entire script is wrapped in the main function.
         lastUpdate = "";
@@ -1087,20 +1097,49 @@ export async function main(ns) {
             this._isTargeting = null;
             this._isXpFarming = null;
             this._percentStolenPerHackThread = null;
+            this._timeToHack = null;
+            this._timeToGrow = null;
+            this._timeToWeaken = null;
             this._hasRootCached = null; // Once we get root, we never lose it, so we can stop asking
             this._files = (/**@returns{Set<string>}*/() => null)(); // Unfortunately, can't cache this forever because a "kill-all-scripts.js" or "cleanup.js" run will wipe them.
         }
         resetCaches() {
             // Reset any caches that can change over time
             this._isPrepped = this._isPrepping = this._isTargeting = this._isXpFarming =
-                this._percentStolenPerHackThread = this._files = null;
+                this._percentStolenPerHackThread = this._timeToHack = this._timeToGrow =
+                this._timeToWeaken = this._files = null;
             // Once true - Does not need to be reset, because once rooted, this fact will never change
             if (this._hasRootCached == false) this._hasRootCached = null;
         }
         getMinSecurity() { return dictServerMinSecurityLevels[this.name] ?? 0; } // Servers not in our dictionary were purchased, and so undefined is okay
         getMaxMoney() { return dictServerMaxMoney[this.name] ?? 0; }
         getMoneyPerRamSecond() { return dictServerProfitInfo ? dictServerProfitInfo[this.name]?.gainRate ?? 0 : (dictServerMaxMoney[this.name] ?? 0); }
-        getExpPerSecond() { return dictServerProfitInfo ? dictServerProfitInfo[this.name]?.expRate ?? 0 : (1 / dictServerMinSecurityLevels[this.name] ?? 0); }
+        getExpPerSecond() {
+            // Use cached data from analyze-hack.js if available (most accurate)
+            if (dictServerProfitInfo && dictServerProfitInfo[this.name]?.expRate) {
+                return dictServerProfitInfo[this.name].expRate;
+            }
+            // Use formulas API for better estimate if available
+            if (hasFormulas) {
+                try {
+                    this.server.hackDifficulty = this.getMinSecurity();
+                    this.server.moneyAvailable = this.getMaxMoney();
+                    const expPerHackThread = this.ns.formulas.hacking.hackExp(this.server, _cachedPlayerInfo);
+                    const hackTime = this.timeToHack();
+                    // Include weaken overhead (0.002 security per hack, 0.05 reduction per weaken)
+                    const weakenThreadsPerHack = 0.002 / 0.05;
+                    const weakenTime = this.timeToWeaken();
+                    // Total XP includes both hack and weaken exp, divided by the longest time
+                    const totalTime = Math.max(hackTime, weakenTime);
+                    const expRate = totalTime > 0 ? (expPerHackThread * (1 + weakenThreadsPerHack) / totalTime) * 1000 : 0;
+                    return expRate;
+                } catch {
+                    hasFormulas = false;
+                }
+            }
+            // Fallback to simple heuristic (inverse of min security)
+            return 1 / (dictServerMinSecurityLevels[this.name] ?? 1);
+        }
         getMoney() { return this.ns.getServerMoneyAvailable(this.name); }
         getSecurity() { return this.ns.getServerSecurityLevel(this.name); }
         canCrack() { return ownedCracks.length >= this.portsRequired; }
@@ -1117,6 +1156,14 @@ export async function main(ns) {
             // Logic for whether we consider the server "prepped" (tolerate a 1% discrepancy)
             this._isPrepped = (currentSecurity == 0 || ((this.getMinSecurity() / currentSecurity) >= 0.99)) &&
                 (this.getMaxMoney() != 0 && ((currentMoney / this.getMaxMoney()) >= 0.99) || stockFocus /* Only prep security in stock-focus mode */);
+            // Validate hack chance if server is prepped (warn if low success rate)
+            if (this._isPrepped && hasFormulas) {
+                const chance = this.hackChance();
+                if (chance < 0.95) {
+                    log(ns, `WARNING: ${this.name} has low hack chance (${formatNumber(chance * 100, 1)}%) at minimum security. ` +
+                        `Required hack level: ${this.requiredHackLevel}, Current: ${playerHackSkill()}`, false, 'warning');
+                }
+            }
             return this._isPrepped;
         }
         /** Does this server have a copy of this file on it last we checked?
@@ -1172,9 +1219,37 @@ export async function main(ns) {
             return 1 / (1 - (this.getHackThreadsNeeded() * this.percentageStolenPerHackThread()));
         }
         cyclesNeededForGrowthCoefficient() {
+            // Use formulas API if available for more accurate growth calculations
+            if (hasFormulas) {
+                try {
+                    this.server.hackDifficulty = this.getMinSecurity();
+                    this.server.moneyAvailable = Math.max(this.getMoney(), 1);
+                    // growPercent returns the multiplier per thread, so we use log to find thread count
+                    const growPercentPerThread = this.ns.formulas.hacking.growPercent(this.server, 1, _cachedPlayerInfo, 1);
+                    return Math.log(this.targetGrowthCoefficient()) / Math.log(growPercentPerThread);
+                } catch {
+                    hasFormulas = false;
+                }
+            }
+            // Fallback to existing logarithmic calculation
             return Math.log(this.targetGrowthCoefficient()) / Math.log(this.adjustedGrowthRate());
         }
         cyclesNeededForGrowthCoefficientAfterTheft() {
+            // Use formulas API if available for more accurate growth calculations
+            if (hasFormulas) {
+                try {
+                    this.server.hackDifficulty = this.getMinSecurity();
+                    // Money after theft
+                    const moneyAfterTheft = this.getMaxMoney() * (1 - this.getHackThreadsNeeded() * this.percentageStolenPerHackThread());
+                    this.server.moneyAvailable = Math.max(moneyAfterTheft, 1);
+                    // growPercent returns the multiplier per thread, so we use log to find thread count
+                    const growPercentPerThread = this.ns.formulas.hacking.growPercent(this.server, 1, _cachedPlayerInfo, 1);
+                    return Math.log(this.targetGrowthCoefficientAfterTheft()) / Math.log(growPercentPerThread);
+                } catch {
+                    hasFormulas = false;
+                }
+            }
+            // Fallback to existing logarithmic calculation
             return Math.log(this.targetGrowthCoefficientAfterTheft()) / Math.log(this.adjustedGrowthRate());
         }
         percentageStolenPerHackThread() {
@@ -1202,6 +1277,24 @@ export async function main(ns) {
             const percentMoneyHacked = (difficultyMult * skillMult * _cachedPlayerInfo.mults.hacking_money * bitNodeMults.ScriptHackMoney) / 240;
             return this._percentStolenPerHackThread = Math.min(1, Math.max(0, percentMoneyHacked));
         }
+        hackChance() {
+            // Calculate the probability of a successful hack at minimum security
+            const hackDifficulty = this.getMinSecurity();
+            if (hackDifficulty > 100) return 0; // Cannot hack servers whose minimum security is over 100
+            // Use formulas API if available for accuracy
+            if (hasFormulas) {
+                try {
+                    // Calculate hack chance at minimum security
+                    this.server.hackDifficulty = hackDifficulty;
+                    this.server.requiredHackingSkill = this.requiredHackLevel;
+                    return this.ns.formulas.hacking.hackChance(this.server, _cachedPlayerInfo);
+                } catch {
+                    hasFormulas = false;
+                }
+            }
+            // Fallback: Assume 100% if formulas unavailable (conservative estimate)
+            return 1.0;
+        }
         actualPercentageToSteal() {
             return this.getHackThreadsNeeded() * this.percentageStolenPerHackThread();
         }
@@ -1210,6 +1303,18 @@ export async function main(ns) {
             return Math.floor((this.percentageToSteal / this.percentageStolenPerHackThread()).toPrecision(14));
         }
         getGrowThreadsNeeded() {
+            // Use formulas API if available for direct thread calculation
+            if (hasFormulas) {
+                try {
+                    this.server.hackDifficulty = this.getMinSecurity();
+                    this.server.moneyAvailable = Math.max(this.getMoney(), 1);
+                    const threads = this.ns.formulas.hacking.growThreads(this.server, _cachedPlayerInfo, this.getMaxMoney(), 1);
+                    return Math.max(0, Math.ceil(threads.toPrecision(14)));
+                } catch {
+                    hasFormulas = false;
+                }
+            }
+            // Fallback to existing calculation
             return Math.max(0, Math.ceil(Math.min(this.getMaxMoney(),
                 // TODO: Not true! Worst case is 1$ per thread and *then* it multiplies. We can return a much lower number here.
                 this.cyclesNeededForGrowthCoefficient() / this.serverGrowthPercentage()).toPrecision(14)));
@@ -1219,7 +1324,23 @@ export async function main(ns) {
         }
         getGrowThreadsNeededAfterTheft() {
             // Note: If recovery thread padding > 1.0, require a minimum of 2 recovery threads, no matter how scaled stats are
-            return Math.max(recoveryThreadPadding > 1 ? 2 : 1, Math.ceil(Math.min(this.getMaxMoney(),
+            const minThreads = recoveryThreadPadding > 1 ? 2 : 1;
+
+            // Use formulas API if available for direct thread calculation
+            if (hasFormulas) {
+                try {
+                    this.server.hackDifficulty = this.getMinSecurity();
+                    // Money after theft
+                    const moneyAfterTheft = this.getMaxMoney() * (1 - this.getHackThreadsNeeded() * this.percentageStolenPerHackThread());
+                    this.server.moneyAvailable = Math.max(moneyAfterTheft, 1);
+                    const threads = this.ns.formulas.hacking.growThreads(this.server, _cachedPlayerInfo, this.getMaxMoney(), 1);
+                    return Math.max(minThreads, Math.ceil((threads * recoveryThreadPadding).toPrecision(14)));
+                } catch {
+                    hasFormulas = false;
+                }
+            }
+            // Fallback to existing calculation
+            return Math.max(minThreads, Math.ceil(Math.min(this.getMaxMoney(),
                 this.cyclesNeededForGrowthCoefficientAfterTheft() / this.serverGrowthPercentage() * recoveryThreadPadding).toPrecision(14)));
         }
         getWeakenThreadsNeededAfterTheft() {
@@ -1245,9 +1366,54 @@ export async function main(ns) {
         ramAvailable(ignoreReservedRam = false) { return this.totalRam(ignoreReservedRam) - this.usedRam(); }
         growDelay() { return this.timeToWeaken() - this.timeToGrow() + cycleTimingDelay; }
         hackDelay() { return this.timeToWeaken() - this.timeToHack(); }
-        timeToWeaken() { return this.ns.getWeakenTime(this.name); }
-        timeToGrow() { return this.ns.getGrowTime(this.name); }
-        timeToHack() { return this.ns.getHackTime(this.name); }
+        timeToWeaken() {
+            // Value is cached until the next call to resetCaches()
+            if (this._timeToWeaken !== null) return this._timeToWeaken;
+            // Use formulas API if available for caching and potential accuracy improvements
+            if (hasFormulas) {
+                try {
+                    // Calculate timing at minimum security for consistency
+                    this.server.hackDifficulty = this.getMinSecurity();
+                    return this._timeToWeaken = this.ns.formulas.hacking.weakenTime(this.server, _cachedPlayerInfo);
+                } catch {
+                    hasFormulas = false;
+                }
+            }
+            // Fallback to NS API call
+            return this._timeToWeaken = this.ns.getWeakenTime(this.name);
+        }
+        timeToGrow() {
+            // Value is cached until the next call to resetCaches()
+            if (this._timeToGrow !== null) return this._timeToGrow;
+            // Use formulas API if available for caching and potential accuracy improvements
+            if (hasFormulas) {
+                try {
+                    // Calculate timing at minimum security for consistency
+                    this.server.hackDifficulty = this.getMinSecurity();
+                    return this._timeToGrow = this.ns.formulas.hacking.growTime(this.server, _cachedPlayerInfo);
+                } catch {
+                    hasFormulas = false;
+                }
+            }
+            // Fallback to NS API call
+            return this._timeToGrow = this.ns.getGrowTime(this.name);
+        }
+        timeToHack() {
+            // Value is cached until the next call to resetCaches()
+            if (this._timeToHack !== null) return this._timeToHack;
+            // Use formulas API if available for caching and potential accuracy improvements
+            if (hasFormulas) {
+                try {
+                    // Calculate timing at minimum security for consistency
+                    this.server.hackDifficulty = this.getMinSecurity();
+                    return this._timeToHack = this.ns.formulas.hacking.hackTime(this.server, _cachedPlayerInfo);
+                } catch {
+                    hasFormulas = false;
+                }
+            }
+            // Fallback to NS API call
+            return this._timeToHack = this.ns.getHackTime(this.name);
+        }
     }
 
     // Helpers to get slices of info / cumulative stats across all rooted servers
@@ -1322,8 +1488,34 @@ export async function main(ns) {
         `ETA: ${formatDuration(currentTarget.timeToWeaken())} at Hack ${playerHackSkill()} (${currentTarget.name})`;
 
     // Adjusts the "percentage to steal" for a target based on its respective cost and the current network RAM available
+    // Helper function to find a better initial steal percentage using formulas
+    function calculateOptimalInitialSteal(currentTarget, networkStats, percentPerHackThread) {
+        if (!hasFormulas) return null; // Only use formulas if available
+
+        try {
+            // Test common steal percentages to find best RAM utilization
+            const testPercentages = [0.05, 0.10, 0.15, 0.20, 0.30, 0.50, 0.75];
+            let bestPercentage = percentPerHackThread;
+            let bestUtilization = 0;
+
+            for (const testPct of testPercentages) {
+                if (testPct < percentPerHackThread) continue; // Skip if below minimum
+                currentTarget.percentageToSteal = testPct;
+                const snapshot = getPerformanceSnapshot(currentTarget, networkStats);
+                if (snapshot.canBeScheduled && snapshot.ramUtilization > bestUtilization) {
+                    bestUtilization = snapshot.ramUtilization;
+                    bestPercentage = testPct;
+                }
+            }
+
+            return bestPercentage;
+        } catch {
+            return null; // Fallback to existing method
+        }
+    }
+
     function optimizePerformanceMetrics(ns, currentTarget) {
-        const maxAdjustments = 1000;
+        const maxAdjustments = 100; // Reduced from 1000 - formulas API should converge much faster
         const start = Date.now();
         const networkStats = getNetworkStats();
         const percentPerHackThread = currentTarget.percentageStolenPerHackThread();
@@ -1341,7 +1533,15 @@ export async function main(ns) {
         let increment = Math.ceil((0.01 / percentPerHackThread).toPrecision(14)); // Initialize the adjustment increment to be the number of hack threads to steal roughly 1%
         let newHackThreads = oldHackThreads;
         let performanceSnapshot = null;
-        currentTarget.percentageToSteal = Math.max(currentTarget.percentageToSteal, percentPerHackThread); // If the initial % to steal is below the minimum, raise it
+
+        // Use formulas to find a better initial steal percentage
+        const optimalInitial = calculateOptimalInitialSteal(currentTarget, networkStats, percentPerHackThread);
+        if (optimalInitial !== null) {
+            currentTarget.percentageToSteal = optimalInitial;
+            newHackThreads = currentTarget.getHackThreadsNeeded();
+        } else {
+            currentTarget.percentageToSteal = Math.max(currentTarget.percentageToSteal, percentPerHackThread); // If the initial % to steal is below the minimum, raise it
+        }
         // Make adjustments to the number of hack threads until we zero in on the best amount
         while (++attempts < maxAdjustments) {
             performanceSnapshot = getPerformanceSnapshot(currentTarget, networkStats);
@@ -1357,7 +1557,12 @@ export async function main(ns) {
             newHackThreads = Math.max(newHackThreads + adjustment, 0); // Adjust the percentage to steal with pefect precision by actually adjusting the number of hack threads
             currentTarget.percentageToSteal = Math.max(0, newHackThreads * percentPerHackThread);
         }
-        if (attempts >= maxAdjustments || verbose && currentTarget.actualPercentageToSteal() != oldActualPercentageToSteal) {
+        // Log when optimization completes or reaches max iterations
+        if (attempts >= maxAdjustments) {
+            log(ns, `WARNING: Optimization reached max iterations (${maxAdjustments}) for ${currentTarget.name}. ` +
+                `Tuned from ${formatNumber(oldActualPercentageToSteal * 100)}% to ${formatNumber(currentTarget.actualPercentageToSteal() * 100)}%. ` +
+                `Took: ${Date.now() - start} ms`, false, 'warning');
+        } else if (verbose && currentTarget.actualPercentageToSteal() != oldActualPercentageToSteal) {
             log(ns, `Tuned % to steal from ${formatNumber(oldActualPercentageToSteal * 100)}% (${oldHackThreads} threads) to ` +
                 `${formatNumber(currentTarget.actualPercentageToSteal() * 100)}% (${currentTarget.getHackThreadsNeeded()} threads) ` +
                 `(${currentTarget.name}) Iterations: ${attempts} Took: ${Date.now() - start} ms`);

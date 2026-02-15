@@ -204,13 +204,21 @@ export async function main(ns) {
                     if (stk.blackoutWindow() >= marketCycleLength - estTick) continue;
                     if (pre4s && (Math.max(pre4sMinHoldTime, pre4sMinBlackoutWindow) >= marketCycleLength - estTick)) continue;
                     // Skip if we already own all possible shares in this stock, or if the expected return is below our threshold, or if shorts are disabled and stock is bearish
-                    if (stk.ownedShares() == stk.maxShares || stk.absReturn() <= thresholdToBuy || (disableShorts && stk.bearish())) continue;
+                    // Apply dynamic risk-adjusted threshold: increase threshold as we approach end of market cycle to compensate for inversion risk
+                    const cycleRiskMultiplier = pre4s ? (1 + (estTick / marketCycleLength) * 0.5) : 1.0; // Up to 1.5x threshold at cycle end
+                    const adjustedThreshold = thresholdToBuy * cycleRiskMultiplier;
+                    if (stk.ownedShares() == stk.maxShares || stk.absReturn() <= adjustedThreshold || (disableShorts && stk.bearish())) continue;
                     // If pre-4s, do not purchase any stock whose last inversion was too recent, or whose probability is too close to 0.5
                     if (pre4s && (stk.lastInversion < minTickHistory || Math.abs(stk.prob - 0.5) < pre4sBuyThresholdProbability)) continue;
 
                     // Enforce diversification: Don't hold more than x% of our portfolio as a single stock (as corpus increases, this naturally stops being a limiter)
                     // Inflate our budget / current position value by a factor of stk.spread_pct to avoid repeated micro-buys of a stock due to the buy/ask spread making holdings appear more diversified after purchase
-                    let budget = Math.min(cash, maxHoldings * (diversification + stk.spread_pct) - stk.positionValue() * (1.01 + stk.spread_pct))
+                    let baseBudget = Math.min(cash, maxHoldings * (diversification + stk.spread_pct) - stk.positionValue() * (1.01 + stk.spread_pct));
+                    // Apply volatility-weighted position sizing: reduce budget for high-volatility stocks to manage risk
+                    // At 0% volatility, use 100% of budget; at max observed volatility, use 50% of budget
+                    const maxVol = Math.max(...stocks.map(s => s.vol), 0.1); // Max volatility across all stocks (min 0.1 to avoid division by zero)
+                    const volAdjustment = 0.5 + 0.5 * (1 - stk.vol / maxVol); // Linear scaling: 0.5 to 1.0
+                    let budget = baseBudget * volAdjustment;
                     let purchasePrice = stk.bullish() ? stk.ask_price : stk.bid_price; // Depends on whether we will be buying a long or short position
                     let affordableShares = Math.floor((budget - commission) / purchasePrice);
                     let numShares = Math.min(stk.maxShares - stk.ownedShares(), affordableShares);

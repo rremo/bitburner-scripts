@@ -142,7 +142,10 @@ async function mainLoop(ns) {
     let globalReserve = Number(ns.read("reserve.txt") || 0);
     let budget = (playerInfo.money - (options['reserve'] || globalReserve)) * options['aug-budget'];
     // Estimate the cost of sleeves training over the next time interval to see if (ignoring income) we would drop below our reserve.
-    const costByNextLoop = interval / 1000 * task.filter(t => t.startsWith("train")).length * 12000; // TODO: Training cost/sec seems to be a bug. Should be 1/5 this ($2400/sec)
+    // Gym training costs $120/sec per sleeve, University costs $80/sec per sleeve (base rates)
+    const trainingSleeveCount = task.filter(t => t?.startsWith("train")).length;
+    const studyingSleeveCount = task.filter(t => t?.startsWith("study")).length;
+    const costByNextLoop = (interval / 1000) * (trainingSleeveCount * 120 + studyingSleeveCount * 80);
     // Get time in current bitnode (to cap how long we'll train sleeves)
     const timeInBitnode = Date.now() - (await getNsDataThroughFile(ns, 'ns.getResetInfo()')).lastNodeReset
     let canTrain = !options['disable-training'] &&
@@ -151,13 +154,27 @@ async function mainLoop(ns) {
         // Don't train if we have no money (unless player has given permission to train into debt)
         (playerInfo.money - costByNextLoop) > (options['training-reserve'] ||
             (promptedForTrainingBudget ? ns.read(trainingReserveFile) : undefined) || globalReserve);
-    // If any sleeve is training at the gym, see if we can purchase a gym upgrade to help them
-    if (canTrain && task.some(t => t?.startsWith("train")) && !options['disable-spending-hashes-for-gym-upgrades'])
-        if (await getNsDataThroughFile(ns, 'ns.hacknet.spendHashes("Improve Gym Training")', '/Temp/spend-hashes-on-gym.txt'))
-            log(ns, `SUCCESS: Bought "Improve Gym Training" to speed up Sleeve training.`, false, 'success');
-    if (canTrain && task.some(t => t?.startsWith("study")) && !options['disable-spending-hashes-for-study-upgrades'])
-        if (await getNsDataThroughFile(ns, 'ns.hacknet.spendHashes("Improve Studying")', '/Temp/spend-hashes-on-study.txt'))
-            log(ns, `SUCCESS: Bought "Improve Studying" to speed up Sleeve studying.`, false, 'success');
+    // If any sleeve is training at the gym, consider purchasing upgrade if ROI is positive
+    const trainingSleeves = task.filter(t => t?.startsWith("train")).length;
+    if (canTrain && trainingSleeves > 0 && !options['disable-spending-hashes-for-gym-upgrades']) {
+        // Check if we have enough hashes (cost: 1000 hashes for gym training upgrade)
+        const currentHashes = await getNsDataThroughFile(ns, 'ns.hacknet.numHashes()');
+        const hashCost = await getNsDataThroughFile(ns, 'ns.hacknet.hashCost("Improve Gym Training")');
+        // Only buy if: we have enough hashes AND (multiple sleeves training OR significant training time remaining)
+        const shouldBuy = currentHashes >= hashCost &&
+            (trainingSleeves >= 2 || timeInBitnode < options['training-cap-seconds'] * 500); // At least 50% training time left
+        if (shouldBuy && await getNsDataThroughFile(ns, 'ns.hacknet.spendHashes("Improve Gym Training")', '/Temp/spend-hashes-on-gym.txt'))
+            log(ns, `SUCCESS: Bought "Improve Gym Training" for ${trainingSleeves} sleeve(s) (${hashCost} hashes).`, false, 'success');
+    }
+    const studyingSleeves = task.filter(t => t?.startsWith("study")).length;
+    if (canTrain && studyingSleeves > 0 && !options['disable-spending-hashes-for-study-upgrades']) {
+        const currentHashes = await getNsDataThroughFile(ns, 'ns.hacknet.numHashes()');
+        const hashCost = await getNsDataThroughFile(ns, 'ns.hacknet.hashCost("Improve Studying")');
+        const shouldBuy = currentHashes >= hashCost &&
+            (studyingSleeves >= 2 || timeInBitnode < options['training-cap-seconds'] * 500);
+        if (shouldBuy && await getNsDataThroughFile(ns, 'ns.hacknet.spendHashes("Improve Studying")', '/Temp/spend-hashes-on-study.txt'))
+            log(ns, `SUCCESS: Bought "Improve Studying" for ${studyingSleeves} sleeve(s) (${hashCost} hashes).`, false, 'success');
+    }
     if (playerInBladeburner && (7 in ownedSourceFiles)) {
         const bladeburnerCity = await getNsDataThroughFile(ns, `ns.bladeburner.getCity()`);
         bladeburnerCityChaos = await getNsDataThroughFile(ns, `ns.bladeburner.getCityChaos(ns.args[0])`, null, [bladeburnerCity]);
@@ -231,8 +248,12 @@ async function pickSleeveTask(ns, playerInfo, playerWorkInfo, i, sleeve, canTrai
             shockChance[i] = Math.random();
             lastRerollTime[i] = Date.now();
         }
-        if (shockChance[i] < options['shock-recovery'])
-            return shockRecoveryTask(sleeve, i, `there is a ${(options['shock-recovery'] * 100).toFixed(1)}% chance (--shock-recovery) of picking this task every minute until fully recovered.`);
+        // Scale recovery probability by shock level: higher shock = higher priority
+        // At 50% shock, use 2x the base probability; at 90% shock, use 3.8x
+        const shockMultiplier = 1 + (sleeve.shock / 50); // Linear scaling from 1x to ~3x
+        const adjustedRecoveryChance = Math.min(options['shock-recovery'] * shockMultiplier, 0.95);
+        if (shockChance[i] < adjustedRecoveryChance)
+            return shockRecoveryTask(sleeve, i, `${(adjustedRecoveryChance * 100).toFixed(1)}% chance (scaled by shock level ${sleeve.shock.toFixed(1)}%) to recover`);
     }
     // Train if our sleeve's physical stats aren't where we want them
     if (canTrain) {
