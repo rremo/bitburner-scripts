@@ -358,8 +358,27 @@ export async function main(ns) {
     /** @param {NS} ns
      * @param {{ type:"move"|"pass"|"gameOver"; x:number; y:number;}} gameInfo
      */
+    // Track win/loss statistics per opponent
+    const winStats = {}; // opponent -> {wins: 0, losses: 0, games: 0}
+
     function checkNewGame(ns, gameInfo) {
         if (gameInfo.type === "gameOver") {
+            // Track game result
+            const currentOpponent = ns.go.getOpponent();
+            if (!winStats[currentOpponent]) {
+                winStats[currentOpponent] = {wins: 0, losses: 0, games: 0};
+            }
+            const didWin = ns.go.getGameState().blackScore > ns.go.getGameState().whiteScore;
+            winStats[currentOpponent].games++;
+            if (didWin) winStats[currentOpponent].wins++;
+            else winStats[currentOpponent].losses++;
+
+            // Log statistics
+            const stats = winStats[currentOpponent];
+            const winRate = (stats.wins / stats.games * 100).toFixed(1);
+            ns.printf("Game over vs %s: %s | Overall: %d-%d (%.1f%% win rate)",
+                currentOpponent, didWin ? "WIN" : "LOSS", stats.wins, stats.losses, winRate);
+
             if (runOnce) ns.exit()
             try { ns.go.resetBoardState(opponent2[Math.floor(Math.random() * opponent2.length)], 13) }
             catch { ns.go.resetBoardState(opponent[Math.floor(Math.random() * opponent.length)], 13) }
@@ -1137,7 +1156,7 @@ export async function main(ns) {
                 (x > 0 && board[x - 1][y] === "O" && validLibMoves[x - 1][y] >= libsMin && validLibMoves[x - 1][y] <= libsMax) ||
                 (x < size - 1 && board[x + 1][y] === "O" && validLibMoves[x + 1][y] >= libsMin && validLibMoves[x + 1][y] <= libsMax) ||
                 (y > 0 && board[x][y - 1] === "O" && validLibMoves[x][y - 1] >= libsMin && validLibMoves[x][y - 1] <= libsMax) ||
-                (y < size - 1 && board[x][y + 1] === "O" && validLibMoves[x][y + 1] >= libsMin && validLibMoves <= libsMax)) ? true : false
+                (y < size - 1 && board[x][y + 1] === "O" && validLibMoves[x][y + 1] >= libsMin && validLibMoves[x][y + 1] <= libsMax)) ? true : false
             const surround = getSurroundLibs(x, y, "X")
             const freeSpace = getFreeSpace(x, y)
             if (freeSpace < minFreeSpace) continue
@@ -1185,7 +1204,7 @@ export async function main(ns) {
                 (x > 0 && board[x - 1][y] === "O" && validLibMoves[x - 1][y] >= libsMin && validLibMoves[x - 1][y] <= libsMax) ||
                 (x < size - 1 && board[x + 1][y] === "O" && validLibMoves[x + 1][y] >= libsMin && validLibMoves[x + 1][y] <= libsMax) ||
                 (y > 0 && board[x][y - 1] === "O" && validLibMoves[x][y - 1] >= libsMin && validLibMoves[x][y - 1] <= libsMax) ||
-                (y < size - 1 && board[x][y + 1] === "O" && validLibMoves[x][y + 1] >= libsMin && validLibMoves <= libsMax)) ? true : false
+                (y < size - 1 && board[x][y + 1] === "O" && validLibMoves[x][y + 1] >= libsMin && validLibMoves[x][y + 1] <= libsMax)) ? true : false
             const surround = getSurroundLibs(x, y, "X")
             const freeSpace = getFreeSpace(x, y)
             if (freeSpace < minFreeSpace) continue
