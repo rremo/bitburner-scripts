@@ -111,7 +111,11 @@ export async function main(ns) {
             // the server computes experience gain based on the server's base difficulty. To get a rate, we divide that by the timeToWeaken
             let relativeExpGain = 3 + server.minDifficulty * 0.3; // Ignore HackExpGain mults since they affect all servers equally
             server.estHackPercent = 1; // Our simple calculations below are based on 100% of server money on every server.
-            [theoreticalGainRate, cappedGainRate, expRate] = [server.moneyMax / timeToHack, server.moneyMax / cappedTimeToHack, relativeExpGain / timeToHack];
+            // Estimate hack chance without formulas: weight gain rates by probability of success
+            const estHackChance = Math.max(0, Math.min(1,
+                ((1.75 * player.skills.hacking - server.requiredHackingSkill) / (1.75 * player.skills.hacking)) *
+                ((100 - server.minDifficulty) / 100)));
+            [theoreticalGainRate, cappedGainRate, expRate] = [server.moneyMax * estHackChance / timeToHack, server.moneyMax * estHackChance / cappedTimeToHack, relativeExpGain / timeToHack];
             ns.print(`Without formulas.exe, based on max money ${formatMoney(server.moneyMax)} and hack-time ${formatDuration(timeToHack)} (capped at ${formatDuration(cappedTimeToHack)})): ` +
                 `Theoretical ${formatMoney(theoreticalGainRate)}, Limit: ${formatMoney(cappedGainRate)}, Exp: ${expRate.toPrecision(3)} (${server.hostname})`);
         }

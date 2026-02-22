@@ -816,7 +816,15 @@ export async function main(ns) {
                         else if (await server.isPrepping())
                             cantHackButPrepping.push(server);
                     } else if (await server.isTargeting()) { // Note servers already being targeted from a prior loop
-                        targeting.push(server); // TODO: Switch to continuously queing batches in the seconds leading up instead of far in advance with large delays
+                        // Detect significant state drift (security spike or money drained) and force re-evaluation
+                        const securityDrift = server.getSecurity() - server.getMinSecurity();
+                        const moneyRatio = server.getMaxMoney() > 0 ? server.getMoney() / server.getMaxMoney() : 1;
+                        if (securityDrift > 10 || moneyRatio < 0.1) {
+                            resetServerSortCache(); // Force re-evaluation of target order next loop
+                            if (verbose) log(ns, `INFO: ${server.name} has significant state drift (security +${formatNumber(securityDrift)}, ` +
+                                `money ${formatNumber(moneyRatio * 100)}% of max). Forced target re-sort.`);
+                        }
+                        targeting.push(server);
                     } else if (await server.isPrepping()) { // Note servers already being prepped from a prior loop
                         prepping.push(server);
                     } else if (isWorkCapped() || xpOnly) { // Various conditions for which we'll postpone any additional work on servers
@@ -1113,7 +1121,12 @@ export async function main(ns) {
         }
         getMinSecurity() { return dictServerMinSecurityLevels[this.name] ?? 0; } // Servers not in our dictionary were purchased, and so undefined is okay
         getMaxMoney() { return dictServerMaxMoney[this.name] ?? 0; }
-        getMoneyPerRamSecond() { return dictServerProfitInfo ? dictServerProfitInfo[this.name]?.gainRate ?? 0 : (dictServerMaxMoney[this.name] ?? 0); }
+        getMoneyPerRamSecond() {
+            if (dictServerProfitInfo && dictServerProfitInfo[this.name]?.gainRate !== undefined)
+                return dictServerProfitInfo[this.name].gainRate;
+            // Fallback: weight by hack chance so servers we can't reliably hack rank lower
+            return (dictServerMaxMoney[this.name] ?? 0) * this.hackChance();
+        }
         getExpPerSecond() {
             // Use cached data from analyze-hack.js if available (most accurate)
             if (dictServerProfitInfo && dictServerProfitInfo[this.name]?.expRate) {
@@ -1131,7 +1144,10 @@ export async function main(ns) {
                     const weakenTime = this.timeToWeaken();
                     // Total XP includes both hack and weaken exp, divided by the longest time
                     const totalTime = Math.max(hackTime, weakenTime);
-                    const expRate = totalTime > 0 ? (expPerHackThread * (1 + weakenThreadsPerHack) / totalTime) * 1000 : 0;
+                    // Weight by expected XP: full on success, 1/4 on failure
+                    const chance = this.hackChance();
+                    const expectedExpMultiplier = chance + (1 - chance) * 0.25;
+                    const expRate = totalTime > 0 ? (expPerHackThread * expectedExpMultiplier * (1 + weakenThreadsPerHack) / totalTime) * 1000 : 0;
                     return expRate;
                 } catch {
                     hasFormulas = false;
@@ -1302,29 +1318,31 @@ export async function main(ns) {
             // Force rounding of low-precision digits before taking the floor, to avoid double imprecision throwing us way off.
             return Math.floor((this.percentageToSteal / this.percentageStolenPerHackThread()).toPrecision(14));
         }
-        getGrowThreadsNeeded() {
+        getGrowThreadsNeeded(cores = 1) {
             // Use formulas API if available for direct thread calculation
             if (hasFormulas) {
                 try {
                     this.server.hackDifficulty = this.getMinSecurity();
                     this.server.moneyAvailable = Math.max(this.getMoney(), 1);
-                    const threads = this.ns.formulas.hacking.growThreads(this.server, _cachedPlayerInfo, this.getMaxMoney(), 1);
+                    const threads = this.ns.formulas.hacking.growThreads(this.server, _cachedPlayerInfo, this.getMaxMoney(), cores);
                     return Math.max(0, Math.ceil(threads.toPrecision(14)));
                 } catch {
                     hasFormulas = false;
                 }
             }
-            // Fallback to existing calculation
+            // Fallback to existing calculation (apply core bonus to reduce thread estimate)
+            const coreBonus = 1 + (cores - 1) / 16;
             return Math.max(0, Math.ceil(Math.min(this.getMaxMoney(),
                 // TODO: Not true! Worst case is 1$ per thread and *then* it multiplies. We can return a much lower number here.
-                this.cyclesNeededForGrowthCoefficient() / this.serverGrowthPercentage()).toPrecision(14)));
+                this.cyclesNeededForGrowthCoefficient() / (this.serverGrowthPercentage() * coreBonus)).toPrecision(14)));
         }
         getWeakenThreadsNeeded() {
             return Math.max(0, Math.ceil(((this.getSecurity() - this.getMinSecurity()) / actualWeakenPotency()).toPrecision(14)));
         }
         getGrowThreadsNeededAfterTheft() {
+            const pad = this.getRecoveryPadding();
             // Note: If recovery thread padding > 1.0, require a minimum of 2 recovery threads, no matter how scaled stats are
-            const minThreads = recoveryThreadPadding > 1 ? 2 : 1;
+            const minThreads = pad > 1 ? 2 : 1;
 
             // Use formulas API if available for direct thread calculation
             if (hasFormulas) {
@@ -1334,22 +1352,42 @@ export async function main(ns) {
                     const moneyAfterTheft = this.getMaxMoney() * (1 - this.getHackThreadsNeeded() * this.percentageStolenPerHackThread());
                     this.server.moneyAvailable = Math.max(moneyAfterTheft, 1);
                     const threads = this.ns.formulas.hacking.growThreads(this.server, _cachedPlayerInfo, this.getMaxMoney(), 1);
-                    return Math.max(minThreads, Math.ceil((threads * recoveryThreadPadding).toPrecision(14)));
+                    return Math.max(minThreads, Math.ceil((threads * pad).toPrecision(14)));
                 } catch {
                     hasFormulas = false;
                 }
             }
             // Fallback to existing calculation
             return Math.max(minThreads, Math.ceil(Math.min(this.getMaxMoney(),
-                this.cyclesNeededForGrowthCoefficientAfterTheft() / this.serverGrowthPercentage() * recoveryThreadPadding).toPrecision(14)));
+                this.cyclesNeededForGrowthCoefficientAfterTheft() / this.serverGrowthPercentage() * pad).toPrecision(14)));
         }
         getWeakenThreadsNeededAfterTheft() {
+            const pad = this.getRecoveryPadding();
             // Note: If recovery thread padding > 1.0, require a minimum of 2 recovery threads, no matter how scaled stats are
-            return Math.max(recoveryThreadPadding > 1 ? 2 : 1, Math.ceil((this.getHackThreadsNeeded() * hackThreadHardening / actualWeakenPotency() * recoveryThreadPadding).toPrecision(14)));
+            return Math.max(pad > 1 ? 2 : 1, Math.ceil((this.getHackThreadsNeeded() * hackThreadHardening / actualWeakenPotency() * pad).toPrecision(14)));
         }
         getWeakenThreadsNeededAfterGrowth() {
             // Note: If recovery thread padding > 1.0, require a minimum of 2 recovery threads, no matter how scaled stats are
-            return Math.max(recoveryThreadPadding > 1 ? 2 : 1, Math.ceil((this.getGrowThreadsNeededAfterTheft() * growthThreadHardening / actualWeakenPotency() * recoveryThreadPadding).toPrecision(14)));
+            const pad = this.getRecoveryPadding();
+            return Math.max(pad > 1 ? 2 : 1, Math.ceil((this.getGrowThreadsNeededAfterTheft() * growthThreadHardening / actualWeakenPotency() * pad).toPrecision(14)));
+        }
+        /** Get effective recovery padding for this target, scaling by server growth rate.
+         *  High-growth servers recover faster, so they need less padding. */
+        getRecoveryPadding() {
+            if (recoveryThreadPadding <= 1) return recoveryThreadPadding;
+            // Scale inversely with server growth (normalized: 1.0 at growth=50)
+            const growthFactor = Math.max(1, this.serverGrowth) / 50;
+            const scaledPadding = recoveryThreadPadding / Math.max(0.5, Math.min(2, growthFactor));
+            return Math.max(1, Math.min(recoveryThreadPadding * 2, scaledPadding));
+        }
+        /** Get dynamic cycle timing delay based on hack chance.
+         *  High hack chance allows tighter batch spacing (more concurrent batches). */
+        getDynamicCycleTimingDelay() {
+            if (!hasFormulas) return cycleTimingDelay;
+            const chance = this.hackChance();
+            if (chance >= 0.98) return Math.max(2000, cycleTimingDelay * 0.5);
+            if (chance >= 0.90) return Math.max(2500, cycleTimingDelay * 0.7);
+            return cycleTimingDelay;
         }
         hasRoot() { return this._hasRootCached ??= this.ns.hasRootAccess(this.name); }
         isHost() { return this.name == daemonHost; }
@@ -1471,7 +1509,7 @@ export async function main(ns) {
             canBeScheduled: maxScheduled > 0,
             // Given our timing delay, **approximately** how many cycles can we initiate before the first batch's first task fires?
             // TODO: Do a better job of calculating this *outside* of the performance snapshot, and only calculate it once.
-            optimalPacedCycles: Math.min(maxBatches, Math.max(1, Math.floor(((currentTarget.timeToWeaken()) / cycleTimingDelay).toPrecision(14))
+            optimalPacedCycles: Math.min(maxBatches, Math.max(1, Math.floor(((currentTarget.timeToWeaken()) / currentTarget.getDynamicCycleTimingDelay()).toPrecision(14))
                 - 1)), // Fudge factor, this isnt an exact science
             // Given RAM availability, how many cycles could we schedule across all hosts?
             maxCompleteCycles: Math.max(maxScheduled - 1, 1) // Fudge factor. The executor isn't perfect
@@ -1488,27 +1526,46 @@ export async function main(ns) {
         `ETA: ${formatDuration(currentTarget.timeToWeaken())} at Hack ${playerHackSkill()} (${currentTarget.name})`;
 
     // Adjusts the "percentage to steal" for a target based on its respective cost and the current network RAM available
-    // Helper function to find a better initial steal percentage using formulas
+    // Uses golden-section search to find the steal % that maximizes expected income per scheduling round
     function calculateOptimalInitialSteal(currentTarget, networkStats, percentPerHackThread) {
         if (!hasFormulas) return null; // Only use formulas if available
 
         try {
-            // Test common steal percentages to find best RAM utilization
-            const testPercentages = [0.05, 0.10, 0.15, 0.20, 0.30, 0.50, 0.75];
-            let bestPercentage = percentPerHackThread;
-            let bestUtilization = 0;
+            const maxSteal = options['max-steal-percentage'];
+            const hackChance = currentTarget.hackChance();
+            let a = percentPerHackThread;
+            let b = Math.min(maxSteal, 0.99);
+            if (a >= b) return a;
+            const gr = (Math.sqrt(5) + 1) / 2; // Golden ratio
+            const tolerance = percentPerHackThread; // Stop when range is within one hack thread's worth
 
-            for (const testPct of testPercentages) {
-                if (testPct < percentPerHackThread) continue; // Skip if below minimum
-                currentTarget.percentageToSteal = testPct;
-                const snapshot = getPerformanceSnapshot(currentTarget, networkStats);
-                if (snapshot.canBeScheduled && snapshot.ramUtilization > bestUtilization) {
-                    bestUtilization = snapshot.ramUtilization;
-                    bestPercentage = testPct;
+            // Objective: maximize expected income per scheduling round
+            const evaluate = (pct) => {
+                currentTarget.percentageToSteal = pct;
+                const snap = getPerformanceSnapshot(currentTarget, networkStats);
+                if (!snap.canBeScheduled) return 0;
+                const batchesSchedulable = Math.min(snap.optimalPacedCycles, snap.maxCompleteCycles);
+                return currentTarget.actualPercentageToSteal() * currentTarget.getMaxMoney() * hackChance * batchesSchedulable;
+            };
+
+            let c = b - (b - a) / gr;
+            let d = a + (b - a) / gr;
+            for (let i = 0; i < 20 && (b - a) > tolerance; i++) {
+                if (evaluate(c) > evaluate(d)) {
+                    b = d;
+                } else {
+                    a = c;
                 }
+                c = b - (b - a) / gr;
+                d = a + (b - a) / gr;
             }
 
-            return bestPercentage;
+            const bestPct = (a + b) / 2;
+            // Validate the result is actually schedulable
+            currentTarget.percentageToSteal = bestPct;
+            const finalSnap = getPerformanceSnapshot(currentTarget, networkStats);
+            if (!finalSnap.canBeScheduled) return null;
+            return bestPct;
         } catch {
             return null; // Fallback to existing method
         }
@@ -1612,7 +1669,8 @@ export async function main(ns) {
             return log(ns, `WARNING: Attempted to schedule empty cycle ${maxCycles} x ${getTargetSummary(currentTarget)}? ${JSON.stringify(snapshot)}`, false, 'warning');
         let firstEnding = null, lastStart = null, lastBatch = 0, cyclesScheduled = 0;
         while (cyclesScheduled < maxCycles) {
-            const newBatchStart = new Date((cyclesScheduled === 0) ? Date.now() + queueDelay : lastBatch.getTime() + cycleTimingDelay);
+            const targetCycleDelay = currentTarget.getDynamicCycleTimingDelay();
+            const newBatchStart = new Date((cyclesScheduled === 0) ? Date.now() + queueDelay : lastBatch.getTime() + targetCycleDelay);
             lastBatch = new Date(newBatchStart.getTime());
             const batchTiming = getScheduleTiming(newBatchStart, currentTarget);
             if (verbose && runOnce) logSchedule(ns, batchTiming, currentTarget); // Special log for troubleshooting batches
@@ -1676,7 +1734,7 @@ export async function main(ns) {
 
     // returns an object that contains all 4 timed events start and end times as dates
     function getScheduleTiming(fromDate, currentTarget) {
-        const delayInterval = cycleTimingDelay / 4; // spacing interval used to pace our script resolution
+        const delayInterval = currentTarget.getDynamicCycleTimingDelay() / 4; // spacing interval used to pace our script resolution
         const hackTime = currentTarget.timeToHack(); // first to fire
         const weakenTime = currentTarget.timeToWeaken(); // second to fire
         const growTime = currentTarget.timeToGrow(); // third to fire
@@ -1901,7 +1959,9 @@ export async function main(ns) {
         if (verbose) log(ns, `INFO: Need ${weakenThreadsNeeded} threads to weaken from ${currentTarget.getSecurity()} to ${currentTarget.getMinSecurity()}. There is room for ${weakenThreadsAllowable} threads (${currentTarget.name})`);
         // Plan grow if needed, but don't bother if we didn't have enough ram to schedule all weaken threads to reach min security
         let growThreadsAllowable, growThreadsNeeded, growThreadsScheduled = 0;
-        if (weakenThreadsNeeded < weakenThreadsAllowable && (growThreadsNeeded = currentTarget.getGrowThreadsNeeded())) {
+        // Use home cores for prep since grow preferentially runs on home (core bonus reduces threads needed)
+        const homeCores = dictInitialServerInfos?.["home"]?.cpuCores ?? 1;
+        if (weakenThreadsNeeded < weakenThreadsAllowable && (growThreadsNeeded = currentTarget.getGrowThreadsNeeded(homeCores))) {
             // During the prep-phase only, we allow grow threads to be split, despite the risks of added security hardening, because in practice is speeds the prep phase along more than waiting for separate batches.
             growThreadsAllowable = growTool.getMaxThreads(/*^*/ true /*^*/) - weakenThreadsNeeded; // Take into account RAM that will be consumed by weaken threads scheduled
             growThreadsScheduled = Math.min(growThreadsNeeded, growThreadsAllowable - 1); // Cap at threads-1 because we assume we will need at least one of these threads for additional weaken recovery
@@ -1960,7 +2020,9 @@ export async function main(ns) {
             (server.hasRoot() || server.canCrack()) &&
             server.canHack() &&
             server.shouldHack() &&
-            (!hasFormulas || server.hackChance() >= 0.95) // Skip servers with <95% hack chance
+            // Include servers with >=50% hack chance: XP is earned on failure too (at 25% rate),
+            // so a 60% chance server with 2x base XP beats a 99% chance server with 1x base XP
+            (!hasFormulas || server.hackChance() >= 0.50)
         ).sort((a, b) => b.getExpPerSecond() - a.getExpPerSecond());
     }
 
